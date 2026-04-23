@@ -10,13 +10,44 @@ const now = new Date();
 const jstDate = new Date(now.getTime() + 9 * 60 * 60 * 1000);
 const today = jstDate.toISOString().slice(0, 10); // YYYY-MM-DD
 
-async function getSheetClient() {
+// Google Drive の共有URLからファイルIDを抽出する
+function extractFileId(input) {
+  if (!input) return null;
+  // https://drive.google.com/file/d/FILE_ID/view 形式
+  const match1 = input.match(/\/d\/([a-zA-Z0-9_-]+)/);
+  if (match1) return match1[1];
+  // https://drive.google.com/open?id=FILE_ID 形式
+  const match2 = input.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+  if (match2) return match2[1];
+  // そのままIDとして扱う
+  return input.trim() || null;
+}
+
+async function getAuth() {
   const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
-  const auth = new google.auth.GoogleAuth({
+  return new google.auth.GoogleAuth({
     credentials,
-    scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+    scopes: [
+      'https://www.googleapis.com/auth/spreadsheets',
+      'https://www.googleapis.com/auth/drive.readonly',
+    ],
   });
-  return google.sheets({ version: 'v4', auth });
+}
+
+async function downloadDriveFile(auth, fileId) {
+  const drive = google.drive({ version: 'v3', auth });
+
+  // ファイルのメタ情報（MIMEタイプ）を取得する
+  const meta = await drive.files.get({ fileId, fields: 'name,mimeType' });
+  const mimeType = meta.data.mimeType;
+
+  // ファイル本体をダウンロードする
+  const res = await drive.files.get(
+    { fileId, alt: 'media' },
+    { responseType: 'arraybuffer' }
+  );
+
+  return { buffer: Buffer.from(res.data), mimeType };
 }
 
 async function main() {
@@ -32,20 +63,21 @@ async function main() {
     process.exit(1);
   }
 
-  const sheets = await getSheetClient();
+  const auth = await getAuth();
+  const sheets = google.sheets({ version: 'v4', auth });
 
-  // スプレッドシートから A〜C 列を取得する
+  // スプレッドシートから A〜D 列を取得する
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `${sheetName}!A:C`,
+    range: `${sheetName}!A:D`,
   });
 
   const rows = res.data.values || [];
-
-  // 1行目はヘッダーなのでスキップして今日の日付の行を探す
   let targetRowIndex = -1;
   let postText = '';
+  let mediaInput = '';
 
+  // 今日の日付の行を探す（1行目はヘッダーなのでスキップ）
   for (let i = 1; i < rows.length; i++) {
     const date = (rows[i][0] || '').trim();
     const status = (rows[i][2] || '').trim();
@@ -57,6 +89,7 @@ async function main() {
         process.exit(0);
       }
       postText = (rows[i][1] || '').trim();
+      mediaInput = (rows[i][3] || '').trim();
       targetRowIndex = i;
       break;
     }
@@ -73,9 +106,12 @@ async function main() {
     process.exit(1);
   }
 
+  const fileId = extractFileId(mediaInput);
+
   console.log('========================================');
   console.log('【今日のX投稿】 ' + today);
   console.log('モード: ' + (isLive ? '🚀 LIVE（実際に投稿します）' : '🧪 DRY-RUN（投稿しません）'));
+  console.log('メディア: ' + (fileId ? 'あり（ID: ' + fileId + '）' : 'なし'));
   console.log('========================================');
   console.log(postText);
   console.log('========================================');
@@ -110,12 +146,29 @@ async function main() {
   });
 
   try {
+    let mediaId = null;
+
+    // メディアがある場合はダウンロードしてXにアップロードする
+    if (fileId) {
+      console.log('\nGoogle Driveからメディアをダウンロード中...');
+      const { buffer, mimeType } = await downloadDriveFile(auth, fileId);
+      console.log('✔ ダウンロード完了（タイプ: ' + mimeType + '）');
+
+      console.log('Xにメディアをアップロード中...');
+      mediaId = await client.v1.uploadMedia(buffer, { mimeType });
+      console.log('✔ メディアアップロード完了');
+    }
+
+    // Xに投稿する
     console.log('\nXに投稿中...');
-    const response = await client.v2.tweet(postText);
+    const tweetData = { text: postText };
+    if (mediaId) {
+      tweetData.media = { media_ids: [mediaId] };
+    }
+    const response = await client.v2.tweet(tweetData);
     const tweetId = response.data.id;
 
     console.log('✔ 投稿成功！');
-    console.log('  ツイートID: ' + tweetId);
     console.log('  URL: https://x.com/i/web/status/' + tweetId);
 
     // スプレッドシートのステータス列を「投稿済み」に更新する
@@ -126,7 +179,7 @@ async function main() {
       requestBody: { values: [['投稿済み']] },
     });
 
-    console.log('\n✔ スプレッドシートのステータスを「投稿済み」に更新しました。');
+    console.log('✔ スプレッドシートのステータスを「投稿済み」に更新しました。');
   } catch (err) {
     console.error('\n[エラー] 投稿に失敗しました。');
     if (err.data) {
