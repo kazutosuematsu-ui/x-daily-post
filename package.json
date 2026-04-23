@@ -1,0 +1,24 @@
+{
+  "name": "x-daily-post",
+  "version": "1.0.0",
+  "description": "7日分のX投稿を1日1本ずつ表示するツール",
+  "main": "post.js",
+  "scripts": {
+    "post": "node post.js",
+    "post:live": "node post.js --live"
+  },
+  "keywords": [
+    "x",
+    "twitter",
+    "sns",
+    "post",
+    "schedule"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^17.3.1",
+    "googleapis": "^144.0.0",
+    "twitter-api-v2": "^1.29.0"
+  }
+}

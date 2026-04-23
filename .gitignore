@@ -1,0 +1,13 @@
+# 環境変数（APIキーを含むため絶対にコミットしない）
+.env
+
+# サービスアカウントのキーファイル
+*.json
+!package.json
+!package-lock.json
+
+# Node.js
+node_modules/
+
+# macOS
+.DS_Store
