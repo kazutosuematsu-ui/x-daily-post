@@ -5,21 +5,20 @@ const { google } = require('googleapis');
 // --live オプションを付けたときだけ実際に投稿する
 const isLive = process.argv.includes('--live');
 
-// 今日の日付を JST（日本時間）で取得する
+// 今日の日付・曜日を JST（日本時間）で取得する
 const now = new Date();
 const jstDate = new Date(now.getTime() + 9 * 60 * 60 * 1000);
 const today = jstDate.toISOString().slice(0, 10); // YYYY-MM-DD
+const WEEKDAYS = ['日', '月', '火', '水', '木', '金', '土'];
+const todayWeekday = WEEKDAYS[jstDate.getUTCDay()]; // 今日の曜日（例: "月"）
 
 // Google Drive の共有URLからファイルIDを抽出する
 function extractFileId(input) {
   if (!input) return null;
-  // https://drive.google.com/file/d/FILE_ID/view 形式
   const match1 = input.match(/\/d\/([a-zA-Z0-9_-]+)/);
   if (match1) return match1[1];
-  // https://drive.google.com/open?id=FILE_ID 形式
   const match2 = input.match(/[?&]id=([a-zA-Z0-9_-]+)/);
   if (match2) return match2[1];
-  // そのままIDとして扱う
   return input.trim() || null;
 }
 
@@ -36,17 +35,12 @@ async function getAuth() {
 
 async function downloadDriveFile(auth, fileId) {
   const drive = google.drive({ version: 'v3', auth });
-
-  // ファイルのメタ情報（MIMEタイプ）を取得する
   const meta = await drive.files.get({ fileId, fields: 'name,mimeType' });
   const mimeType = meta.data.mimeType;
-
-  // ファイル本体をダウンロードする
   const res = await drive.files.get(
     { fileId, alt: 'media' },
     { responseType: 'arraybuffer' }
   );
-
   return { buffer: Buffer.from(res.data), mimeType };
 }
 
@@ -77,15 +71,16 @@ async function main() {
   let postText = '';
   let mediaInput = '';
 
-  // 今日の日付の行を探す（1行目はヘッダーなのでスキップ）
+  // 今日の曜日と一致する行を探す（1行目はヘッダーなのでスキップ）
   for (let i = 1; i < rows.length; i++) {
-    const date = (rows[i][0] || '').trim();
-    const status = (rows[i][2] || '').trim();
+    const weekday = (rows[i][0] || '').trim();
+    const lastPostedDate = (rows[i][2] || '').trim();
 
-    if (date === today) {
-      if (status === '投稿済み') {
+    if (weekday === todayWeekday) {
+      // 今日すでに投稿済みか確認する
+      if (lastPostedDate === today) {
         console.log('今日の投稿はすでに完了しています。');
-        console.log('（日付: ' + today + '）');
+        console.log('（日付: ' + today + '、曜日: ' + todayWeekday + '）');
         process.exit(0);
       }
       postText = (rows[i][1] || '').trim();
@@ -96,8 +91,8 @@ async function main() {
   }
 
   if (targetRowIndex === -1) {
-    console.log('今日（' + today + '）の投稿がスプレッドシートに見つかりませんでした。');
-    console.log('A列に今日の日付、B列に投稿文を追加してください。');
+    console.log('今日（' + todayWeekday + '曜日）の投稿がスプレッドシートに見つかりませんでした。');
+    console.log('A列に曜日（月・火・水・木・金・土・日）を入力してください。');
     process.exit(0);
   }
 
@@ -109,7 +104,7 @@ async function main() {
   const fileId = extractFileId(mediaInput);
 
   console.log('========================================');
-  console.log('【今日のX投稿】 ' + today);
+  console.log('【今日のX投稿】 ' + today + '（' + todayWeekday + '曜日）');
   console.log('モード: ' + (isLive ? '🚀 LIVE（実際に投稿します）' : '🧪 DRY-RUN（投稿しません）'));
   console.log('メディア: ' + (fileId ? 'あり（ID: ' + fileId + '）' : 'なし'));
   console.log('========================================');
@@ -148,7 +143,6 @@ async function main() {
   try {
     let mediaId = null;
 
-    // メディアがある場合はダウンロードしてXにアップロードする
     if (fileId) {
       console.log('\nGoogle Driveからメディアをダウンロード中...');
       const { buffer, mimeType } = await downloadDriveFile(auth, fileId);
@@ -159,7 +153,6 @@ async function main() {
       console.log('✔ メディアアップロード完了');
     }
 
-    // Xに投稿する
     console.log('\nXに投稿中...');
     const tweetData = { text: postText };
     if (mediaId) {
@@ -171,15 +164,15 @@ async function main() {
     console.log('✔ 投稿成功！');
     console.log('  URL: https://x.com/i/web/status/' + tweetId);
 
-    // スプレッドシートのステータス列を「投稿済み」に更新する
+    // C列に今日の日付を記録する（次回同じ曜日に再投稿するため）
     await sheets.spreadsheets.values.update({
       spreadsheetId,
       range: `${sheetName}!C${targetRowIndex + 1}`,
       valueInputOption: 'RAW',
-      requestBody: { values: [['投稿済み']] },
+      requestBody: { values: [[today]] },
     });
 
-    console.log('✔ スプレッドシートのステータスを「投稿済み」に更新しました。');
+    console.log('✔ スプレッドシートの最終投稿日を更新しました。');
   } catch (err) {
     console.error('\n[エラー] 投稿に失敗しました。');
     if (err.data) {
